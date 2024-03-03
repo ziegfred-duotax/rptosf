@@ -1,6 +1,7 @@
 # Other files
 test*.*
 mainbak.py
+*.json
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
