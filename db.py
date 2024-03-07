@@ -60,6 +60,6 @@ class RPDataDB:
             "SELECT * FROM accounts WHERE SCRAPED_PAGE_COUNT < %s LIMIT 1", (limit, ))
         return self.cursor.fetchone()
 
-    def increment_account(self, username: str, limit):
+    def increment_account(self, username: str):
         self.cursor.execute(
-            "UPDATE accounts SET SCRAPED_PAGE_COUNT=SCRAPED_PAGE_COUNT + 1 WHERE USERNAME=%s AND SCRAPED_PAGE_COUNT < %s", (username, limit))
+            "UPDATE accounts SET SCRAPED_PAGE_COUNT=SCRAPED_PAGE_COUNT + 1 WHERE USERNAME=%s", (username,))

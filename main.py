@@ -7,7 +7,6 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.wait import WebDriverWait
-from exceptions import *
 import selenium.webdriver.support.expected_conditions as EC
 import seleniumwire.undetected_chromedriver as uc
 import os
@@ -194,28 +193,20 @@ def switch_to_rp():
                 login_rp()
 
 
+def get_rp_data_account(reset=False):
+    with RPDataDB(DB_CONFIG) as conn:
+        if reset:
+            conn.reset_account_page_scraped_count()
+            conn.conn.commit()
+        return conn.get_account(SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
+
+
 def start_rp_to_sf():
+    start = time.time()
     global CURRENT_ACCOUNT
     logger.debug("GETTING RP DATA ACCOUNT")
-    with RPDataDB(DB_CONFIG) as conn:
-        CURRENT_ACCOUNT = conn.get_account(SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
-    while True:
-        if CURRENT_ACCOUNT is None or CURRENT_ACCOUNT["SCRAPED_PAGE_COUNT"] >= SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT:
-            logger.info(
-                "THIS ACCOUNT HAS ALREADY REACHED %s PAGES. GETTING ANOTHER ACCOUNT", SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
-            logger.debug("DELETING RP DATA COOKIES")
-            delete_rp_data_cookies()
-            with RPDataDB(DB_CONFIG) as conn:
-                CURRENT_ACCOUNT = conn.get_account(
-                    SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
-                if CURRENT_ACCOUNT is None:
-                    logger.info("RESETTING ACCOUNT SCRAPED PAGE COUNT")
-                    conn.reset_account_page_scraped_count()
-                    driver.switch_to.window(WINDOW_HANDLES['SF'])
-                    driver.refresh()
-            with RPDataDB(DB_CONFIG) as conn:
-                CURRENT_ACCOUNT = conn.get_account(
-                    SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
+    CURRENT_ACCOUNT = get_rp_data_account(reset=True)
+    while CURRENT_ACCOUNT is not None:
         switch_to_sf()
         logger.info("OPENING LIST OF OPPORTUNITIES: %s",
                     SF_CLASSIC_OPPORTUNITIES_LIST_URL)
@@ -262,7 +253,7 @@ def start_rp_to_sf():
 
         for opp in opps:
             edited = False
-            actions = ActionChains(driver, 600)
+            actions = ActionChains(driver, 300)
             if opp['RP_ID']:
                 rp_info_url = RP_PROPERTY_INFO_BASE_URL.replace(
                     '[rpId]', opp['RP_ID'])
@@ -380,15 +371,24 @@ def start_rp_to_sf():
                     except:
                         logger.error(
                             "THERE WAS A PROBLEM SAVING: %s", opp['OPP_URL'])
-        CURRENT_ACCOUNT["SCRAPED_PAGE_COUNT"] += 1
+        logger.debug("INCREMENTING ACCOUNT FROM DATABASE: %s",
+                     CURRENT_ACCOUNT['USERNAME'])
         with RPDataDB(DB_CONFIG) as conn:
             conn.increment_account(
-                CURRENT_ACCOUNT['USERNAME'], SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
-            logger.debug("INCREMENTING ACCOUNT FROM DATABASE: %s",
-                         CURRENT_ACCOUNT['USERNAME'])
+                CURRENT_ACCOUNT['USERNAME'])
+        old_username = CURRENT_ACCOUNT['USERNAME']
+        CURRENT_ACCOUNT = get_rp_data_account()
+        if CURRENT_ACCOUNT and CURRENT_ACCOUNT['USERNAME'] != old_username:
+            logger.debug("DELETING RP DATA COOKIES")
+            driver.switch_to.window(WINDOW_HANDLES['RP'])
+            delete_rp_data_cookies()
+            driver.refresh()
         logger.info("RELOADING OPPORTUNITIES PAGE: %s",
                     SF_CLASSIC_OPPORTUNITIES_LIST_URL)
-
+    logger.info("FINISHED SCRAPING SESSION")
+    end = time.time()
+    execution_time = end - start
+    print("Execution time: " , execution_time, " seconds")
 
 def enter_data_to_sf_fields(opp: dict, property_info: dict, actions: ActionChains):
     edited = False
