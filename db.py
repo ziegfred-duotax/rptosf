@@ -1,5 +1,6 @@
 from mysql.connector import connect
 import json
+import datetime
 
 
 class RPDataDB:
@@ -34,7 +35,7 @@ class RPDataDB:
         self.cursor.executemany("INSERT IGNORE INTO properties(RP_ID, PROPERTY_ADDRESS, IS_ACTIVE, IS_UNIT) VALUES(%s, %s, %s, %s)", properties)
 
     def get_property_info(self, rp_id):
-        self.cursor.execute("SELECT PROPERTY_INFO FROM properties WHERE RP_ID=%s", (rp_id, ))
+        self.cursor.execute("SELECT PROPERTY_INFO FROM properties WHERE RP_ID=%s AND PROPERTY_INFO IS NOT NULL", (rp_id, ))
         property = self.cursor.fetchone()
         if property:
             property_info = json.loads(property['PROPERTY_INFO'])
@@ -48,17 +49,17 @@ class RPDataDB:
     #     self.cursor.execute(
     #         "INSERT IGNORE INTO properties(RP_ID, RP_SUGGESTION_INFO) VALUES(%s, %s)", (rp_id, rp_suggestion_info))
 
-    def set_property_info(self, rp_id: int, property_info: str):
-        self.cursor.execute("UPDATE properties SET PROPERTY_INFO=%s WHERE RP_ID=%s", (property_info, rp_id))
+    def set_property_info(self, rp_id: int, property_info: str, date_scraped):
+        self.cursor.execute("UPDATE properties SET PROPERTY_INFO=%s, DATE_SCRAPED=%s WHERE RP_ID=%s", (property_info, date_scraped, rp_id))
 
     def reset_account_page_scraped_count(self):
         self.cursor.execute("UPDATE accounts SET SCRAPED_PAGE_COUNT=0")
 
-    def get_account(self):
+    def get_account(self, limit):
         self.cursor.execute(
-            "SELECT * FROM accounts WHERE SCRAPED_PAGE_COUNT < 5 LIMIT 1")
+            "SELECT * FROM accounts WHERE SCRAPED_PAGE_COUNT < %s LIMIT 1", (limit, ))
         return self.cursor.fetchone()
 
-    def increment_account(self, username: str):
+    def increment_account(self, username: str, limit):
         self.cursor.execute(
-            "UPDATE accounts SET SCRAPED_PAGE_COUNT=SCRAPED_PAGE_COUNT + 1 WHERE USERNAME=%s AND SCRAPED_PAGE_COUNT < 5", (username, ))
+            "UPDATE accounts SET SCRAPED_PAGE_COUNT=SCRAPED_PAGE_COUNT + 1 WHERE USERNAME=%s AND SCRAPED_PAGE_COUNT < %s", (username, limit))

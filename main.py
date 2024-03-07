@@ -7,6 +7,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.wait import WebDriverWait
+from exceptions import *
 import selenium.webdriver.support.expected_conditions as EC
 import seleniumwire.undetected_chromedriver as uc
 import os
@@ -14,6 +15,7 @@ import time
 import logging
 import json
 import gzip
+import datetime
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,18 +23,21 @@ logger = logging.getLogger(__name__)
 
 selenium_logger = logging.getLogger('selenium')
 seleniumwire_logger = logging.getLogger('seleniumwire')
+selenium_logger.setLevel(logging.ERROR)
+seleniumwire_logger.setLevel(logging.ERROR)
 
 load_dotenv()
 
 BOT_ENV = os.getenv('BOT_ENV', 'DEBUG')
-logger.info(f"BOT RUNNING IN {BOT_ENV}")
-if BOT_ENV in ["DEBUG", "TEST"]:
-    selenium_logger.setLevel(logging.DEBUG)
-    seleniumwire_logger.setLevel(logging.DEBUG)
+logger.info("BOT RUNNING IN %s", BOT_ENV)
 
-elif BOT_ENV == "PRODUCTION":
-    selenium_logger.setLevel(logging.ERROR)
-    seleniumwire_logger.setLevel(logging.ERROR)
+# if BOT_ENV == "DEBUG":
+#     selenium_logger.setLevel(logging.DEBUG)
+#     seleniumwire_logger.setLevel(logging.DEBUG)
+
+# if BOT_ENV in ["PRODUCTION", "TEST"]:
+#     selenium_logger.setLevel(logging.ERROR)
+#     seleniumwire_logger.setLevel(logging.ERROR)
 
 
 DB_CONFIG = {
@@ -72,6 +77,12 @@ WINDOW_HANDLES = {
     "AUTH": None,
     "RP": None
 }
+
+
+def delete_rp_data_cookies():
+    for cookie in driver.get_cookies():
+        if 'corelogic.com.au' in cookie['domain']:
+            driver.delete_cookie(cookie['name'])
 
 
 def is_in_login_page_sf():
@@ -134,6 +145,7 @@ def login_sf():
 
 
 def login_rp():
+    global CURRENT_ACCOUNT
     logger.info("LOGGING IN TO RP DATA")
     if not WINDOW_HANDLES['RP']:
         driver.execute_script("window.open()")
@@ -141,14 +153,6 @@ def login_rp():
         for i in driver.window_handles:
             if i not in WINDOW_HANDLES.values():
                 WINDOW_HANDLES['RP'] = i
-    CURRENT_ACCOUNT = None
-    while True:
-        with RPDataDB(DB_CONFIG) as conn:
-            CURRENT_ACCOUNT = conn.get_account()
-            if CURRENT_ACCOUNT is not None:
-                break
-            conn.reset_account_page_scraped_count()
-
     driver.switch_to.window(WINDOW_HANDLES['RP'])
     driver.get(RP_BASE_URL)
     while not driver.find_elements(By.CSS_SELECTOR, "h1#crux-home-greeting"):
@@ -191,16 +195,33 @@ def switch_to_rp():
 
 
 def start_rp_to_sf():
-    switch_to_sf()
-    logger.info(
-        f"NAVIGATING TO LIST OF OPPORTUNITIES {SF_CLASSIC_OPPORTUNITIES_LIST_URL}")
-    page = 0
+    global CURRENT_ACCOUNT
+    logger.debug("GETTING RP DATA ACCOUNT")
+    with RPDataDB(DB_CONFIG) as conn:
+        CURRENT_ACCOUNT = conn.get_account(SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
     while True:
-        if page == SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT:
+        if CURRENT_ACCOUNT is None or CURRENT_ACCOUNT["SCRAPED_PAGE_COUNT"] >= SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT:
             logger.info(
-                "THIS ACCOUNT HAS ALREADY REACHED 5 PAGES. TERMINATING...")
-            break
+                "THIS ACCOUNT HAS ALREADY REACHED %s PAGES. GETTING ANOTHER ACCOUNT", SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
+            logger.debug("DELETING RP DATA COOKIES")
+            delete_rp_data_cookies()
+            with RPDataDB(DB_CONFIG) as conn:
+                CURRENT_ACCOUNT = conn.get_account(
+                    SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
+                if CURRENT_ACCOUNT is None:
+                    logger.info("RESETTING ACCOUNT SCRAPED PAGE COUNT")
+                    conn.reset_account_page_scraped_count()
+                    driver.switch_to.window(WINDOW_HANDLES['SF'])
+                    driver.refresh()
+            with RPDataDB(DB_CONFIG) as conn:
+                CURRENT_ACCOUNT = conn.get_account(
+                    SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
+        switch_to_sf()
+        logger.info("OPENING LIST OF OPPORTUNITIES: %s",
+                    SF_CLASSIC_OPPORTUNITIES_LIST_URL)
         driver.get(SF_CLASSIC_OPPORTUNITIES_LIST_URL)
+        logger.info("GETTING OPPORTUNITIES: %s",
+                    SF_CLASSIC_OPPORTUNITIES_LIST_URL)
         opp_rows = None
         try:
             opp_rows = WebDriverWait(driver, 10).until(
@@ -208,10 +229,13 @@ def start_rp_to_sf():
                     (By.CSS_SELECTOR, "div.x-grid3-row"))
             )
         except:
-            logger.info("NO OPPORTUNITIES FOUND")
+            logger.info("NO OPPORTUNITIES FOUND: %s",
+                        SF_CLASSIC_OPPORTUNITIES_LIST_URL)
             break
 
         opps = []
+        logger.debug("PARSING OPPORTUNITIES: %s",
+                     SF_CLASSIC_OPPORTUNITIES_LIST_URL)
         for opp_row in opp_rows:
             opp_a_tag = opp_row.find_element(
                 By.CSS_SELECTOR, 'div.x-grid3-col-OPPORTUNITY_NAME > a')
@@ -221,7 +245,7 @@ def start_rp_to_sf():
             opp_name = opp_a_tag.find_element(
                 By.CSS_SELECTOR, "span").get_attribute('innerText')
             if 'CC' in opp_name:
-                logger.info(f"SKIPPED {opp_url} HAS CC")
+                logger.info("SKIPPED %s HAS CC: ", opp_url)
                 continue
             rp_url = None
             try:
@@ -231,7 +255,7 @@ def start_rp_to_sf():
                 pass
             opps.append({
                 'OPP_URL': opp_url,
-                'OPP_ADDRESS': opp_address,
+                'OPP_ADDRESS': opp_address if opp_address else None,
                 'RP_URL': rp_url,
                 'RP_ID': None if rp_url is None else get_rp_id_from_url(rp_url)
             })
@@ -239,13 +263,9 @@ def start_rp_to_sf():
         for opp in opps:
             edited = False
             actions = ActionChains(driver, 600)
-
             if opp['RP_ID']:
                 rp_info_url = RP_PROPERTY_INFO_BASE_URL.replace(
                     '[rpId]', opp['RP_ID'])
-                logging.info(
-                    f"GETTING PROPERTY INFO FROM RP DATA: {opp['OPP_URL']}")
-                time.sleep(0.4)
                 property_info = None
                 property_info_from_db = False
                 with RPDataDB(DB_CONFIG) as conn:
@@ -254,14 +274,16 @@ def start_rp_to_sf():
                         property_info_from_db = True
                 while property_info is None:
                     switch_to_rp()
+                    logger.info(
+                        "GETTING PROPERTY INFO FROM RP DATA: %s", rp_info_url)
                     driver.get(rp_info_url)
                     property_info = find_property_data_api_response()
                 if not property_info_from_db:
                     with RPDataDB(DB_CONFIG) as conn:
                         conn.set_property_info(
-                            opp['RP_ID'], json.dumps(property_info))
+                            opp['RP_ID'], json.dumps(property_info), datetime.datetime.now().date())
                 switch_to_sf()
-                logging.info(f"TRANSFERRING RP DATA TO SF: {opp['OPP_URL']}")
+                logging.info("TRANSFERRING RP DATA TO SF: %s", opp['OPP_URL'])
                 driver.get(opp['OPP_URL'] + '/e')
                 try:
                     WebDriverWait(driver, 5).until(
@@ -269,31 +291,27 @@ def start_rp_to_sf():
                             (By.XPATH, '//input[@title="Save"]'))
                     )
                 except:
-                    logger.error(f"SAVE BUTTON NOT FOUND: {opp['OPP_URL']}")
+                    logger.error("SAVE BUTTON NOT FOUND: %s", opp['OPP_URL'])
                     continue
 
                 edited = enter_data_to_sf_fields(opp, property_info, actions)
 
+            elif opp['OPP_ADDRESS'] is None:
+                logger.info("NO PROPERTY ADDRESS: %s", opp['OPP_URL'])
+                continue
             else:
                 switch_to_rp()
-                logger.info(f"GETTING RP DATA ID: {opp['OPP_URL']}")
+                logger.info("GETTING RP DATA ID: %s", opp['OPP_URL'])
                 suggestions_url = generate_suggestion_api_url_by_property_address(
                     opp['OPP_ADDRESS'])
+                logger.info("SEACRCHING FOR RP DATA ID: %s", suggestions_url)
                 driver.get(suggestions_url)
                 suggestions = find_property_suggestion_api_response()
-                attempt = 0
-                while suggestions is None:
-                    switch_to_rp()
-                    driver.get(suggestions_url)
-                    suggestions = find_property_suggestion_api_response()
-                    attempt += 1
-
-                if not suggestions:
-                    logger.info(f"NO SUGGESTIONS: {opp['OPP_URL']}")
+                if suggestions is None:
+                    logger.info("NO RP DATA ID SUGGESTIONS: %s",
+                                opp['OPP_URL'])
                     continue
-
                 suggestion = None
-
                 rp_properties_to_save = []
                 for i in suggestions.copy():
                     if 'suggestionId' in i:
@@ -307,7 +325,7 @@ def start_rp_to_sf():
                         conn.save_properties(rp_properties_to_save)
 
                 if suggestion is None:
-                    logger.info(f"NO SUGGESTIONS: {opp['OPP_URL']}")
+                    logger.info("NO SUGGESTIONS: %s", opp['OPP_URL'])
                     continue
 
                 opp['RP_ID'] = str(suggestion['suggestionId'])
@@ -321,16 +339,18 @@ def start_rp_to_sf():
                     property_info = conn.get_property_info(opp['RP_ID'])
                     if property_info:
                         property_info_from_db = True
-                        logger.info("FOUND FROM DATABASE")
-                while property_info is None:
-                    switch_to_rp()
+                if property_info is None:
                     driver.get(rp_info_url)
                     property_info = find_property_data_api_response()
+
+                if property_info is None:
+                    logger.info("NO PROPERTY INFO: %s", rp_info_url)
+                    continue
 
                 if not property_info_from_db:
                     with RPDataDB(DB_CONFIG) as conn:
                         conn.set_property_info(
-                            opp['RP_ID'], json.dumps(property_info))
+                            opp['RP_ID'], json.dumps(property_info), datetime.datetime.now().date())
                 switch_to_sf()
                 driver.get(opp['OPP_URL'] + '/e')
                 try:
@@ -339,10 +359,9 @@ def start_rp_to_sf():
                             (By.XPATH, '//input[@title="Save"]'))
                     )
                 except:
-                    logger.error(f"SAVE BUTTON NOT FOUND: {opp['OPP_URL']}")
+                    logger.error("SAVE BUTTON NOT FOUND: %s", opp['OPP_URL'])
                     continue
                 edited = enter_data_to_sf_fields(opp, property_info, actions)
-
             if edited:
                 rp_data_bot_scraped = driver.find_element(
                     By.XPATH, '//label[text()="RP Data Bot Scraped"]/../..//a')
@@ -350,22 +369,25 @@ def start_rp_to_sf():
                     By.XPATH, '//input[@title="Save"]')
                 actions = actions.move_to_element(rp_data_bot_scraped).click(
                     rp_data_bot_scraped).pause(0.8)
-                if BOT_ENV == "PROD":
+                if BOT_ENV == "PRODUCTION":
                     actions = actions.click(save_button)
                 actions.perform()
-
-                if BOT_ENV == "PROD":
+                if BOT_ENV == "PRODUCTION":
                     try:
                         WebDriverWait(driver, 5).until(
                             EC.url_contains(SF_CLASSIC_HOME_URL)
                         )
                     except:
                         logger.error(
-                            f"THERE WAS A PROBLEM SAVING: {opp['OPP_URL']}")
-        page += 1
+                            "THERE WAS A PROBLEM SAVING: %s", opp['OPP_URL'])
+        CURRENT_ACCOUNT["SCRAPED_PAGE_COUNT"] += 1
         with RPDataDB(DB_CONFIG) as conn:
-            conn.increment_account(CURRENT_ACCOUNT['USERNAME'])
-        logger.info("PROCEEDING TO NEXT PAGE")
+            conn.increment_account(
+                CURRENT_ACCOUNT['USERNAME'], SF_SCRAPE_OPPORTUNITIES_PAGE_LIMIT)
+            logger.debug("INCREMENTING ACCOUNT FROM DATABASE: %s",
+                         CURRENT_ACCOUNT['USERNAME'])
+        logger.info("RELOADING OPPORTUNITIES PAGE: %s",
+                    SF_CLASSIC_OPPORTUNITIES_LIST_URL)
 
 
 def enter_data_to_sf_fields(opp: dict, property_info: dict, actions: ActionChains):
@@ -444,10 +466,9 @@ def find_property_data_api_response():
         if 'propertyTimeline?includeCommons=true' in req.url:
             raw_obj = gzip.decompress(req.response.body).decode('utf-8')
             del driver.requests
-            if 'isActiveProperty' not in raw_obj:
-                return None
             obj = json.loads(raw_obj)
-            return obj
+            logger.debug("%s RESPONSE: %s", req.url, obj)
+            return obj if 'isActiveProperty' in obj else None
     return None
 
 
@@ -456,10 +477,9 @@ def find_property_suggestion_api_response():
         if '/api/clapi/suggestions?' in req.url:
             raw_obj = gzip.decompress(req.response.body).decode('utf-8')
             del driver.requests
-            if 'suggestions' not in raw_obj:
-                return None
             obj = json.loads(raw_obj)
-            return obj['suggestions']
+            logger.debug("%s RESPONSE: %s", req.url, obj)
+            return obj.get('suggestions', None)
     return None
 
 
