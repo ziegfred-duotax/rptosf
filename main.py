@@ -388,7 +388,8 @@ def start_rp_to_sf():
     logger.info("FINISHED SCRAPING SESSION")
     end = time.time()
     execution_time = end - start
-    print("Execution time: " , execution_time, " seconds")
+    print("Execution time: ", execution_time, " seconds")
+
 
 def enter_data_to_sf_fields(opp: dict, property_info: dict, actions: ActionChains):
     edited = False
